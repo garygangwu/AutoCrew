@@ -19,7 +19,7 @@ def chat(user_message: str) -> str:
     _model = cfg["model"]
 
     # Register the agent loop so spawn_agent can call it
-    tools.set_agent_loop(_run_sub_agent)
+    tools.set_agent_loop(run_sub_agent)
 
     # Build system prompt with available skills
     system_prompt = cfg["system_prompt"]
@@ -35,15 +35,15 @@ def chat(user_message: str) -> str:
     history = session.load()
     messages = [{"role": "system", "content": system_prompt}] + history
 
-    reply = _run_agent_loop(_client, _model, messages, tools.TOOL_SCHEMAS)
+    reply = run_agent_loop(_client, _model, messages, tools.TOOL_SCHEMAS)
 
     session.append("assistant", reply)
     return reply
 
 
-def _run_sub_agent(messages: list, sub_tools: list) -> str:
+def run_sub_agent(messages: list, sub_tools: list) -> str:
     """Entry point for spawn_agent — runs a child agent loop with restricted tools."""
-    return _run_agent_loop(_client, _model, messages, sub_tools)
+    return run_agent_loop(_client, _model, messages, sub_tools)
 
 
 def _print_request(model: str, messages: list, iteration: int, tool_schemas: list | None = None) -> None:
@@ -118,7 +118,7 @@ def _print_response(full_text: str, tool_call_list: list, iteration: int, thinki
     print(f"{'─'*60}\n")
 
 
-def _run_agent_loop(client: OpenAI, model: str, messages: list, tool_schemas: list) -> str:
+def run_agent_loop(client: OpenAI, model: str, messages: list, tool_schemas: list) -> str:
     """Call the model in a loop, executing tool calls until it produces a final text reply."""
     iteration = 0
     while True:

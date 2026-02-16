@@ -5,12 +5,14 @@ import sys
 
 import agent
 import session
+import team
 
 
 COMMANDS = {
     "/quit": "Exit the chat",
     "/clear": "Clear conversation history",
     "/history": "Show conversation history",
+    "/team": "Start a multi-agent team run (usage: /team <task>)",
     "/help": "Show available commands",
 }
 
@@ -57,6 +59,20 @@ def main():
             continue
         elif user_input == "/help":
             print_help()
+            continue
+        elif user_input.startswith("/team "):
+            task = user_input[6:].strip()
+            if not task:
+                print("Usage: /team <task description>")
+                continue
+            try:
+                run = team.TeamRun(task)
+                summary = run.run()
+                session.append("user", f"/team {task}")
+                session.append("assistant", f"[Team result] {summary}")
+                print(f"\n{summary}")
+            except Exception as e:
+                print(f"Team error: {e}", file=sys.stderr)
             continue
 
         try:
