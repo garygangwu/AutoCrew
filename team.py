@@ -22,7 +22,7 @@ TEAM_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "post_message",
-            "description": "Post a message to the team message board. Use 'to' to address a specific agent (by agent_id or role) or 'all' to broadcast.",
+            "description": "Post a message to the team message board. Every recipient you address will be activated in order after your turn ends. Use 'to' to address a specific agent (by agent_id or role) or 'all' to hand off to the next agent in the roster.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -101,6 +101,9 @@ class TeamRun:
         self.done_summary = ""
         self.roster: list[dict] = []
         self.agent_histories: dict[str, list] = {}
+        self._pending_agents: list[str] = []  # queue of resolved agent_ids to activate
+        self._current_agent: str = ""
+        self._consecutive_fallbacks: int = 0
 
         os.makedirs(self.artifacts_dir, exist_ok=True)
         # Create empty messages file
@@ -117,6 +120,12 @@ class TeamRun:
         }
         with open(self.messages_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        # Resolve recipient to an agent_id and enqueue if not already pending
+        resolved = self._resolve_recipient(to)
+        if resolved and resolved not in self._pending_agents:
+            print(f"enqueueing agent: {resolved}, to: {to}", flush=True)
+            self._pending_agents.append(resolved)
+        print(f"pending agents: {self._pending_agents}", flush=True)
         return "Message posted."
 
     def read_messages(self, for_agent: str, last_n: int = 20) -> str:
@@ -287,9 +296,11 @@ class TeamRun:
             f"You are {agent_entry['agent_id']} (role: {agent_entry['role']}).\n"
             f"Your focus: {agent_entry['focus']}\n\n"
             f"Team roster:\n{roster_text}\n\n"
-            f"Artifacts directory: {self.artifacts_dir}\n"
-            f"Use post_message to communicate with other agents. "
-            f"Use read_messages to check for updates."
+            f"Artifacts directory: {self.artifacts_dir}\n\n"
+            f"IMPORTANT: When you post_message to an agent, that agent will be activated "
+            f"automatically after your turn ends. Do NOT poll read_messages waiting for a "
+            f"reply — it won't arrive until your turn is over. Post your message(s) and "
+            f"then finish your turn by responding with text (even just 'Done.')."
         )
 
         # Add skill info if agent has use_skill
@@ -304,6 +315,33 @@ class TeamRun:
 
         return prompt
 
+    # --- Resolve recipients and manage the activation queue ---
+
+    def _resolve_recipient(self, to: str) -> str | None:
+        """Resolve a post_message 'to' value to a concrete agent_id."""
+        # Roster order: non-orchestrators first, orchestrator last
+        non_orch = [a for a in self.roster if a["role"] != "orchestrator"]
+        orch = [a for a in self.roster if a["role"] == "orchestrator"]
+        agent_order = non_orch + orch
+
+        # Exact agent_id match
+        for a in agent_order:
+            if a["agent_id"] == to:
+                return to
+
+        # Role name match — return first agent of that role
+        for a in agent_order:
+            if a["role"] == to:
+                return a["agent_id"]
+
+        return None
+
+    def _pop_next_agent(self) -> str | None:
+        """Pop and return the next agent from the pending queue."""
+        if self._pending_agents:
+            return self._pending_agents.pop(0)
+        return None
+
     # --- Main runner ---
 
     def run(self) -> str:
@@ -317,77 +355,105 @@ class TeamRun:
         # Step 2: Post initial task
         self.post_message("system", "all", f"TASK: {self.task}")
 
-        # Step 3: Order agents — non-orchestrators first, orchestrator last
-        non_orch = [a for a in self.roster if a["role"] != "orchestrator"]
-        orch = [a for a in self.roster if a["role"] == "orchestrator"]
-        agent_order = non_orch + orch
+        # Step 3: Find orchestrator — it always kicks things off
+        orch_id = None
+        for a in self.roster:
+            if a["role"] == "orchestrator":
+                orch_id = a["agent_id"]
+                break
+        next_agent = orch_id
 
-        max_rounds = 10
-        for round_num in range(1, max_rounds + 1):
+        max_turns = 30
+        turn_count = 0
+
+        while next_agent and turn_count < max_turns and not self.done:
+            turn_count += 1
+            self._current_agent = next_agent
+
+            # Find agent entry
+            agent_entry = None
+            for a in self.roster:
+                if a["agent_id"] == next_agent:
+                    agent_entry = a
+                    break
+            if not agent_entry:
+                break
+
+            role_def = roles.get_role(agent_entry["role"])
+            if not role_def:
+                break
+
             print(f"\n{'='*60}", flush=True)
-            print(f"  TEAM ROUND {round_num}/{max_rounds}", flush=True)
+            print(f"  TURN {turn_count}/{max_turns} — {next_agent}", flush=True)
+            print(f"  remaining agents: {self._pending_agents}", flush=True)
             print(f"{'='*60}", flush=True)
 
-            for agent_entry in agent_order:
-                if self.done:
-                    break
+            # Build tools and handlers
+            schemas, handler_overrides = self.build_agent_tools(next_agent, role_def)
 
-                agent_id = agent_entry["agent_id"]
-                role_def = roles.get_role(agent_entry["role"])
-                if not role_def:
-                    continue
+            # Temporarily inject team handlers
+            original_handlers = {}
+            for name, handler in handler_overrides.items():
+                original_handlers[name] = tools.HANDLERS.get(name)
+                tools.HANDLERS[name] = handler
 
-                print(f"\n--- Agent: {agent_id} ---", flush=True)
+            try:
+                # Build messages
+                system_prompt = self.build_system_prompt(agent_entry, role_def)
+                history = self.agent_histories.get(next_agent, [])
 
-                # Build tools and handlers
-                schemas, handler_overrides = self.build_agent_tools(agent_id, role_def)
+                board_snapshot = self.read_messages(next_agent, last_n=20)
+                user_msg = (
+                    f"Turn {turn_count}. Continue working on your tasks.\n\n"
+                    f"Current message board:\n{board_snapshot}"
+                )
 
-                # Temporarily inject team handlers
-                original_handlers = {}
-                for name, handler in handler_overrides.items():
-                    original_handlers[name] = tools.HANDLERS.get(name)
-                    tools.HANDLERS[name] = handler
+                messages = [{"role": "system", "content": system_prompt}]
+                messages.extend(history)
+                messages.append({"role": "user", "content": user_msg})
 
-                try:
-                    # Build messages
-                    system_prompt = self.build_system_prompt(agent_entry, role_def)
-                    history = self.agent_histories.get(agent_id, [])
+                # Run agent loop (cap iterations so agents yield their turn)
+                reply = run_agent_loop(client, model, messages, schemas, max_iterations=16)
 
-                    # Include a message board snapshot in the user message
-                    board_snapshot = self.read_messages(agent_id, last_n=20)
-                    user_msg = (
-                        f"Round {round_num}. Continue working on your tasks.\n\n"
-                        f"Current message board:\n{board_snapshot}"
-                    )
+                # Save to per-agent history (trimmed)
+                history.append({"role": "user", "content": user_msg})
+                history.append({"role": "assistant", "content": reply})
+                if len(history) > 6:
+                    history = history[-6:]
+                self.agent_histories[next_agent] = history
 
-                    messages = [{"role": "system", "content": system_prompt}]
-                    messages.extend(history)
-                    messages.append({"role": "user", "content": user_msg})
-
-                    # Run agent loop
-                    reply = run_agent_loop(client, model, messages, schemas)
-
-                    # Save to per-agent history (trimmed)
-                    history.append({"role": "user", "content": user_msg})
-                    history.append({"role": "assistant", "content": reply})
-                    # Keep last 6 messages
-                    if len(history) > 6:
-                        history = history[-6:]
-                    self.agent_histories[agent_id] = history
-
-                finally:
-                    # Restore original handlers
-                    for name, orig in original_handlers.items():
-                        if orig is None:
-                            tools.HANDLERS.pop(name, None)
-                        else:
-                            tools.HANDLERS[name] = orig
+            finally:
+                for name, orig in original_handlers.items():
+                    if orig is None:
+                        tools.HANDLERS.pop(name, None)
+                    else:
+                        tools.HANDLERS[name] = orig
 
             if self.done:
-                print(f"\n[team] Done! Summary: {self.done_summary}", flush=True)
                 break
-        else:
-            self.done_summary = "(team reached max rounds without completing)"
+
+            # Resolve next agent from the pending queue
+            resolved = self._pop_next_agent()
+            print('^'*60, flush=True)
+            print(f"POP the next agent: {resolved}", flush=True)
+            print(f"remaining agents: {self._pending_agents}", flush=True)
+            print('^'*60, flush=True)
+            if resolved:
+                next_agent = resolved
+                self._consecutive_fallbacks = 0
+            else:
+                # Fallback to orchestrator
+                self._consecutive_fallbacks += 1
+                if self._consecutive_fallbacks >= 2:
+                    self.done_summary = "(team ended: orchestrator could not route work)"
+                    print(f"\n[team] {self.done_summary}", flush=True)
+                    break
+                next_agent = orch_id
+
+        if self.done:
+            print(f"\n[team] Done! Summary: {self.done_summary}", flush=True)
+        elif turn_count >= max_turns:
+            self.done_summary = "(team reached max turns without completing)"
             print(f"\n[team] {self.done_summary}", flush=True)
 
         return self.done_summary

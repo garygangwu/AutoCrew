@@ -74,10 +74,10 @@ def _print_request(model: str, messages: list, iteration: int, tool_schemas: lis
 
 
 def _print_response(full_text: str, tool_call_list: list, iteration: int, thinking: str = "") -> None:
-    """Pretty-print the accumulated response from OpenAI."""
-    print(f"\n{'─'*60}")
+    """Pretty-print the response from OpenAI."""
+    print(f"\n{'*'*60}")
     print(f"  RESPONSE FROM OPENAI (iteration {iteration})")
-    print(f"{'─'*60}")
+    print(f"{'*'*60}")
 
     if thinking:
         print(f"\n  💭 Thinking ({len(thinking)} chars):")
@@ -115,11 +115,12 @@ def _print_response(full_text: str, tool_call_list: list, iteration: int, thinki
     else:
         print(f"\n  ✦ Tool calls: (none) — final response")
 
-    print(f"{'─'*60}\n")
+    print(f"{'*'*60}\n")
 
 
-def run_agent_loop(client: OpenAI, model: str, messages: list, tool_schemas: list) -> str:
-    """Call the model in a loop, executing tool calls until it produces a final text reply."""
+def run_agent_loop(client: OpenAI, model: str, messages: list, tool_schemas: list, max_iterations: int = 0) -> str:
+    """Call the model in a loop, executing tool calls until it produces a final text reply.
+    If max_iterations > 0, stop after that many iterations even if the model wants more tool calls."""
     iteration = 0
     while True:
         iteration += 1
@@ -129,58 +130,31 @@ def run_agent_loop(client: OpenAI, model: str, messages: list, tool_schemas: lis
             model=model,
             messages=messages,
             tools=tool_schemas,
-            stream=True,
+            stream=False
         )
+        msg = response.choices[0].message
+        full_text = msg.content or ""
+        thinking = getattr(msg, "reasoning_content", None) or ""
+        tool_call_list = []
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                tool_call_list.append({
+                    "id": tc.id,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                })
 
-        # Accumulate the streamed response
-        text_parts = []
-        thinking_parts = []
-        _in_thinking = False
-        tool_calls_by_index: dict[int, dict] = {}
+        print('.'*60, flush=True)
+        print("LLM Response:", flush=True)
+        if thinking:
+            print(f"\n  💭 Thinking:\n{thinking}", flush=True)
+        if full_text:
+            print(full_text, flush=True)
+        print('.'*60, '\n', flush=True)
 
-        for chunk in response:
-            delta = chunk.choices[0].delta
-
-            # Stream thinking tokens (reasoning models)
-            reasoning = getattr(delta, "reasoning_content", None)
-            if reasoning:
-                if not _in_thinking:
-                    _in_thinking = True
-                    print(f"\n  💭 Thinking...", flush=True)
-                print(reasoning, end="", flush=True)
-                thinking_parts.append(reasoning)
-
-            # Stream text to stdout immediately
-            if delta.content:
-                if _in_thinking:
-                    _in_thinking = False
-                    print()  # newline after thinking
-                print(delta.content, end="", flush=True)
-                text_parts.append(delta.content)
-
-            # Accumulate tool call fragments
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    if idx not in tool_calls_by_index:
-                        tool_calls_by_index[idx] = {
-                            "id": "",
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    entry = tool_calls_by_index[idx]
-                    if tc.id:
-                        entry["id"] = tc.id
-                    if tc.function:
-                        if tc.function.name:
-                            entry["function"]["name"] += tc.function.name
-                        if tc.function.arguments:
-                            entry["function"]["arguments"] += tc.function.arguments
-
-        full_text = "".join(text_parts)
-        full_thinking = "".join(thinking_parts)
-        tool_call_list = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
-
-        _print_response(full_text, tool_call_list, iteration, full_thinking)
+        _print_response(full_text, tool_call_list, iteration, thinking)
 
         # No tool calls — we're done
         if not tool_call_list:
@@ -220,5 +194,9 @@ def run_agent_loop(client: OpenAI, model: str, messages: list, tool_schemas: lis
                 "tool_call_id": tc["id"],
                 "content": result,
             })
+
+        # Check iteration limit
+        if max_iterations > 0 and iteration >= max_iterations:
+            return full_text
 
         # Loop back — model will process tool results and either call more tools or reply
