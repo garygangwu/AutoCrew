@@ -34,8 +34,21 @@ def main() -> int:
     # Validate ANTHROPIC_API_KEY
     api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     if not api_key:
+        # Try to load from .env file
+        env_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r") as f:
+                    for line in f:
+                        if line.startswith("ANTHROPIC_API_KEY="):
+                            api_key = line.split("=", 1)[1].strip()
+                            break
+            except Exception:
+                pass
+
+    if not api_key:
         eprint("Error: ANTHROPIC_API_KEY environment variable is not set.")
-        eprint("Set it with: export ANTHROPIC_API_KEY=sk-ant-...")
+        eprint("Set it in .env or with: export ANTHROPIC_API_KEY=sk-ant-...")
         return 2
 
     # Validate anthropic package

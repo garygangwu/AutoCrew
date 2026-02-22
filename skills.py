@@ -39,10 +39,12 @@ def list_skills() -> list[dict]:
 
 
 def load_skill(name: str) -> str:
-    """Return the full SKILL.md content for the given skill name."""
-    path = os.path.join(SKILLS_DIR, name, "SKILL.md")
+    """Return the full SKILL.md content for the given skill name, with {baseDir} resolved."""
+    skill_dir = os.path.join(SKILLS_DIR, name)
+    path = os.path.join(skill_dir, "SKILL.md")
     try:
         with open(path) as f:
-            return f.read()
+            content = f.read()
+        return content.replace("{baseDir}", skill_dir)
     except FileNotFoundError:
         return f"Error: skill not found: {name}"
