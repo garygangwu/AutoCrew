@@ -8,13 +8,13 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
 def _parse_frontmatter(text: str) -> dict:
-    """Extract name and description from YAML frontmatter (simple parser, no PyYAML needed)."""
+    """Extract selected frontmatter keys (simple parser, no PyYAML needed)."""
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return {}
     result = {}
     for line in m.group(1).splitlines():
-        for key in ("name", "description"):
+        for key in ("name", "description", "exec_timeout_sec"):
             if line.startswith(f"{key}:"):
                 result[key] = line[len(key) + 1:].strip()
     return result
@@ -48,3 +48,24 @@ def load_skill(name: str) -> str:
         return content.replace("{baseDir}", skill_dir)
     except FileNotFoundError:
         return f"Error: skill not found: {name}"
+
+
+def skill_exec_timeout_sec(name: str) -> int | None:
+    """Return skill-specific default exec timeout in seconds, or None if not set/invalid."""
+    path = os.path.join(SKILLS_DIR, name, "SKILL.md")
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+    meta = _parse_frontmatter(text)
+    raw = meta.get("exec_timeout_sec")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None

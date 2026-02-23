@@ -111,7 +111,7 @@ That's it. The new tool is immediately available to all agents.
 
 | Tool             | Description                              |
 |------------------|------------------------------------------|
-| `exec`           | Run any shell command (30s timeout)      |
+| `exec`           | Run any shell command (default 30s timeout, configurable) |
 | `read_file`      | Read a file's contents                   |
 | `write_file`     | Write content to a file                  |
 | `web_fetch`      | Fetch a URL and convert to markdown      |

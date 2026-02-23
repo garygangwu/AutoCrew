@@ -121,6 +121,11 @@ def _print_response(full_text: str, tool_call_list: list, iteration: int, thinki
 def run_agent_loop(client: OpenAI, model: str, messages: list, tool_schemas: list, max_iterations: int = 0) -> str:
     """Call the model in a loop, executing tool calls until it produces a final text reply.
     If max_iterations > 0, stop after that many iterations even if the model wants more tool calls."""
+    # Reset skill-scoped runtime defaults for each top-level loop invocation.
+    # This prevents cross-turn leakage in team mode while still allowing:
+    # use_skill -> exec timeout defaults within a single loop.
+    tools.clear_active_skill_context()
+
     iteration = 0
     while True:
         iteration += 1

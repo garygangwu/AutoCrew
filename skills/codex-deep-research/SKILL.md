@@ -1,6 +1,7 @@
 ---
 name: codex-deep-research
 description: Research a topic with Codex CLI and produce a concise evidence-backed summary. Use when the user asks for deep research, literature review, market/technical landscape analysis, source-backed findings, or key takeaways with citations.
+exec_timeout_sec: 300
 metadata:
   { "autocrew": { "emoji": "🔎", "requires": { "bins": ["codex"] } } }
 ---

@@ -17,11 +17,24 @@ import skills
 
 # Callback set by agent.py to avoid circular import
 _agent_loop_fn = None
+_active_skill_name: str | None = None
+_active_skill_exec_timeout_sec: int | None = None
+
+DEFAULT_EXEC_TIMEOUT_SEC = 30
+MIN_EXEC_TIMEOUT_SEC = 5
+MAX_EXEC_TIMEOUT_SEC = 900
 
 
 def set_agent_loop(fn):
     global _agent_loop_fn
     _agent_loop_fn = fn
+
+
+def clear_active_skill_context():
+    """Reset active skill defaults (used between agent turns/sessions)."""
+    global _active_skill_name, _active_skill_exec_timeout_sec
+    _active_skill_name = None
+    _active_skill_exec_timeout_sec = None
 
 
 TOOL_SCHEMAS = [
@@ -36,6 +49,13 @@ TOOL_SCHEMAS = [
                     "command": {
                         "type": "string",
                         "description": "The shell command to execute",
+                    },
+                    "timeout_sec": {
+                        "type": "integer",
+                        "description": (
+                            "Optional timeout in seconds for this command. "
+                            f"If omitted, uses active skill default or {DEFAULT_EXEC_TIMEOUT_SEC}s."
+                        ),
                     },
                 },
                 "required": ["command"],
@@ -189,13 +209,30 @@ TOOL_SCHEMAS = [
 
 
 def exec_command(command: str) -> str:
+    return exec_command_with_timeout(command, None)
+
+
+def _clamp_exec_timeout(timeout_sec: int) -> int:
+    return max(MIN_EXEC_TIMEOUT_SEC, min(MAX_EXEC_TIMEOUT_SEC, timeout_sec))
+
+
+def _resolve_exec_timeout(timeout_sec: int | None) -> int:
+    if timeout_sec is not None:
+        return _clamp_exec_timeout(int(timeout_sec))
+    if _active_skill_exec_timeout_sec is not None:
+        return _clamp_exec_timeout(int(_active_skill_exec_timeout_sec))
+    return DEFAULT_EXEC_TIMEOUT_SEC
+
+
+def exec_command_with_timeout(command: str, timeout_sec: int | None) -> str:
+    resolved_timeout = _resolve_exec_timeout(timeout_sec)
     try:
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=resolved_timeout,
         )
         output = ""
         if result.stdout:
@@ -206,7 +243,8 @@ def exec_command(command: str) -> str:
             output += f"\n(exit code {result.returncode})"
         return output.strip() or "(no output)"
     except subprocess.TimeoutExpired:
-        return "Error: command timed out after 30 seconds"
+        skill_hint = f" (active skill: {_active_skill_name})" if _active_skill_name else ""
+        return f"Error: command timed out after {resolved_timeout} seconds{skill_hint}"
 
 
 def read_file(path: str) -> str:
@@ -368,10 +406,23 @@ def spawn_agent(task: str) -> str:
     return result
 
 
+def use_skill(name: str) -> str:
+    """Load skill instructions and activate skill-level exec timeout defaults."""
+    global _active_skill_name, _active_skill_exec_timeout_sec
+
+    content = skills.load_skill(name)
+    if content.startswith("Error:"):
+        return content
+
+    _active_skill_name = name
+    _active_skill_exec_timeout_sec = skills.skill_exec_timeout_sec(name)
+    return content
+
+
 # --- Dispatch ---
 
 HANDLERS = {
-    "exec": lambda args: exec_command(args["command"]),
+    "exec": lambda args: exec_command_with_timeout(args["command"], args.get("timeout_sec")),
     "read_file": lambda args: read_file(args["path"]),
     "write_file": lambda args: write_file(args["path"], args["content"]),
     "web_fetch": lambda args: web_fetch(args["url"]),
@@ -381,7 +432,7 @@ HANDLERS = {
         args.get("seconds", 4),
         args.get("size", "1280x720"),
     ),
-    "use_skill": lambda args: skills.load_skill(args["name"]),
+    "use_skill": lambda args: use_skill(args["name"]),
     "spawn_agent": lambda args: spawn_agent(args["task"]),
 }
 
